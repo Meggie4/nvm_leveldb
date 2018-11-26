@@ -153,6 +153,10 @@ target_sources(leveldb
     "${PROJECT_SOURCE_DIR}/util/options.cc"
     "${PROJECT_SOURCE_DIR}/util/random.h"
     "${PROJECT_SOURCE_DIR}/util/status.cc"
+    ###########meggie
+    "${PROJECT_SOURCE_DIR}/util/debug.cc"
+    "${PROJECT_SOURCE_DIR}/util/debug.h"
+    ##########meggie
 
   # Only CMake 3.3+ supports PUBLIC sources in targets exported by "install".
   $<$<VERSION_GREATER:CMAKE_VERSION,3.2>:PUBLIC>
@@ -198,7 +202,7 @@ link_directories("/usr/local/lib")
 link_directories("/home/meggie/下载/memkind/jemalloc/obj/lib")
 target_link_libraries(leveldb memkind)
 target_link_libraries(leveldb jemalloc)
-target_include_directories(leveldb 
+target_include_directories(leveldb
   PUBLIC
   "/usr/local/include"
   "/home/meggie/下载/memkind/jemalloc/obj/include")
@@ -235,7 +239,7 @@ endif(HAVE_CLANG_THREAD_SAFETY)
 ###############meggie
   target_compile_options(leveldb
     PUBLIC
-    -D_GNU_SOURCE -DMEMKIND_INTERNAL_API -DJE_PREFIX=jemk_ 
+    -D_GNU_SOURCE -DMEMKIND_INTERNAL_API -DJE_PREFIX=jemk_
     -g -O2 -pthread)
 ###############meggie
 

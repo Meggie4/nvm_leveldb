@@ -34,8 +34,9 @@ class LEVELDB_EXPORT Cache;
 // of Cache uses a least-recently-used eviction policy.
 LEVELDB_EXPORT Cache* NewLRUCache(size_t capacity);
 ///////////meggie
-LEVELDB_EXPORT Cache* NewNVMLRUCache(struct memkind *pmem_kind, size_t capacity);
-LEVELDB_EXPORT Cache* NewTwoLevelCache(size_t L1_capacity, struct memkind* pmem_kind, size_t L2_capacity);
+LEVELDB_EXPORT Cache* NewNVMLRUCache(std::string dirname, size_t capacity);
+//LEVELDB_EXPORT Cache* NewTwoLevelCache(size_t L1_capacity, struct memkind* pmem_kind, size_t L2_capacity);
+LEVELDB_EXPORT Cache* NewTwoLevelCache(size_t L1_capacity, std::string dirname, size_t L2_capacity);
 //////////////meggie
 
 class LEVELDB_EXPORT Cache {

@@ -21,12 +21,16 @@
 #include "port/thread_annotations.h"
 #include "util/hash.h"
 #include "util/mutexlock.h"
+////////////meggie
+#include "util/debug.h"
+#include "util/coding.h"
+///////////meggie
 
 namespace leveldb {
 
 Cache::~Cache() {
 }
-
+size_t sum_nvm_charge = 0;
 namespace {
 
 // LRU cache implementation
@@ -64,6 +68,7 @@ struct LRUHandle {
   uint32_t hash;      // Hash of key(); used for fast sharding and comparisons
   //////meggie
   bool L1_handle_;//不能放在最后，因为之后分配内存的时候，删去了最后一个字节所占的内存？？？
+  size_t value_charge;
   /////meggie
   char key_data[1];   // Beginning of key
 
@@ -82,8 +87,8 @@ struct LRUHandle {
 // 4.4.3's builtin hashtable.
 class HandleTable {
  public:
-  HandleTable(struct memkind *pmem_kind, bool is_nvm) : 
-            length_(0), elems_(0), list_(nullptr), 
+  HandleTable(struct memkind *pmem_kind, bool is_nvm, size_t& usage, port::Mutex& mutex) : 
+            length_(0), elems_(0), list_(nullptr), usage_(usage), mutex_(mutex),
             table_kind(pmem_kind), nvm_table(is_nvm){ Resize(); }
   ~HandleTable() { 
     //////////////meggie
@@ -138,6 +143,8 @@ class HandleTable {
   ////////////meggie
   bool nvm_table;
   struct memkind *table_kind;
+  port::Mutex& mutex_;//互斥锁
+  size_t& usage_ GUARDED_BY(mutex_);//目前LRU cache所占据的内存空间
   //////////megggie
 
   // Return a pointer to slot that points to a cache entry that
@@ -161,6 +168,12 @@ class HandleTable {
     LRUHandle** new_list;
     if(nvm_table && table_kind){
         new_list = (LRUHandle**)memkind_malloc(table_kind, sizeof(LRUHandle*[new_length]));
+        if(!new_list){
+         char error_message[MEMKIND_ERROR_MESSAGE_SIZE];
+         memkind_error_message(errno, error_message, MEMKIND_ERROR_MESSAGE_SIZE);
+        }
+        sum_nvm_charge += sizeof(LRUHandle*[new_length]);
+        usage_ += sizeof(LRUHandle*[new_length]);
     }
     else{
       new_list = new LRUHandle*[new_length];//重新分配hash桶头节点指针
@@ -184,6 +197,8 @@ class HandleTable {
     //////////////meggie
     if(nvm_table && table_kind){
       memkind_free(table_kind, list_);
+      sum_nvm_charge -= sizeof(LRUHandle*[length_]);
+      usage_ -= sizeof(LRUHandle*[length_]);
     }
     else{
       delete[] list_;//释放内存空间
@@ -202,10 +217,11 @@ class LRUCache {//实质就是通过handleTable和LRUHandle实现的
                   capacity_(Capacity),
                   cache_kind(pmem_kind), 
                   nvm_cache(is_nvm), 
-                  table_(pmem_kind, is_nvm),
+                  table_(pmem_kind, is_nvm, usage_, mutex_),
                   L1_cache_(L1_cache),
                   upper_cache_(NULL),
                   lower_cache_(NULL),
+                  value_usage_(0),
                   usage_(0) {//环形双向链表
     lru_.next = &lru_;
     lru_.prev = &lru_;
@@ -271,6 +287,7 @@ class LRUCache {//实质就是通过handleTable和LRUHandle实现的
   // mutex_ protects the following state.
   mutable port::Mutex mutex_;//互斥锁
   size_t usage_ GUARDED_BY(mutex_);//目前LRU cache所占据的内存空间
+  size_t value_usage_ GUARDED_BY(mutex_);//目前LRU cache所占据的内存空间
 
   // Dummy head of LRU list.
   // lru.prev is newest entry, lru.next is oldest entry.
@@ -289,7 +306,7 @@ LRUCache::~LRUCache() {//析构函数，
   //fprintf(stderr, "before ~LRUCache\n");
   assert(in_use_.next == &in_use_);  // Error if caller has an unreleased handle
   for (LRUHandle* e = lru_.next; e != &lru_; ) {//只是对引用数减1,真正对handle释放内存空间，在unref()函数
-    fprintf(stderr, "nvm_cache:%d lru_list is not empty\n", nvm_cache);
+    //fprintf(stderr, "nvm_cache:%d lru_list is not empty\n", nvm_cache);
     LRUHandle* next = e->next;//先保存下一个handle的指针
     assert(e->in_cache);
     e->in_cache = false;//表示不在缓存中了，此时引用数应该为1
@@ -297,11 +314,11 @@ LRUCache::~LRUCache() {//析构函数，
     Unref(e);//引用数为0,调用函数进行善后工作，并释放内存
     e = next;
   }
-  fprintf(stderr, "nvm_cache:%d,after ~LRUCache\n",nvm_cache);
+  //fprintf(stderr, "nvm_cache:%d,after ~LRUCache\n",nvm_cache);
 }
 
 void LRUCache::Ref(LRUHandle* e) {
-  fprintf(stderr, "nvm_cache:%d,ref\n", nvm_cache);
+  //fprintf(stderr, "nvm_cache:%d,ref\n", nvm_cache);
   if (e->refs == 1 && e->in_cache) {  // If on lru_ list, move to in_use_ list.如果已经在lru list中了，那就将其移到in_use list中
     LRU_Remove(e);
     LRU_Append(&in_use_, e);
@@ -310,7 +327,6 @@ void LRUCache::Ref(LRUHandle* e) {
 }
 
 void LRUCache::Unref(LRUHandle* e) {//解引用
-  //fprintf(stderr, "before unref\n");
   assert(e->refs > 0);
   e->refs--;//引用数-1
   if (e->refs == 0) {  // Deallocate.引用数为0了
@@ -318,9 +334,8 @@ void LRUCache::Unref(LRUHandle* e) {//解引用
     (*e->deleter)(e->key(), e->value);
     ///////////meggie
     if(nvm_cache && cache_kind){
-      fprintf(stderr, "before memkind_free\n");
       memkind_free(cache_kind, e);
-      fprintf(stderr, "after memkind_free\n");
+      sum_nvm_charge -= e->charge;
     }
     //////////meggie
     else
@@ -330,7 +345,6 @@ void LRUCache::Unref(LRUHandle* e) {//解引用
     LRU_Remove(e);//将LRU从 in_use list中移除
     LRU_Append(&lru_, e);//将LRU加入到 lru_list中，lru_list第一个节点就是最早未使用的节点
   }
-  fprintf(stderr, "after unref\n");
 }
 
 void LRUCache::LRU_Remove(LRUHandle* e) {//从相应的链表中移除
@@ -341,7 +355,7 @@ void LRUCache::LRU_Remove(LRUHandle* e) {//从相应的链表中移除
 void LRUCache::LRU_Append(LRUHandle* list, LRUHandle* e) {//加入到相应的链表list中
   // Make "e" newest entry by inserting just before *list\
 
-  fprintf(stderr, "nvm_cache:%d, append\n", nvm_cache);
+  //fprintf(stderr, "nvm_cache:%d, append\n", nvm_cache);
   e->next = list;
   e->prev = list->prev;
   e->prev->next = e;
@@ -365,78 +379,100 @@ void LRUCache::Release(Cache::Handle* handle) {//表示不使用了，解引用
 Cache::Handle* LRUCache::Insert(
     const Slice& key, uint32_t hash, void* value, size_t charge,
     void (*deleter)(const Slice& key, void* value)) {//将key和数据封装成handle插入到LRUcache中
-  fprintf(stderr, "this is insert\n");
   MutexLock l(&mutex_);
   ////////////meggie
   LRUHandle* e;
   Cache::Handle* result;
+  size_t nvm_charge;
+  size_t check_usage;//nvm cache校验的usage和dram cache校验的usage不一样
+  int myKey = DecodeFixed32(key.data());
+  if(myKey >= 131071){
+      struct memkind_pmem* priv = reinterpret_cast<memkind_pmem*>(cache_kind->priv);
+      DEBUG_T("key:%d, usage:%lu,capacity:%lu, max_size:%lu\n", myKey, usage_, capacity_, priv->max_size);
+  }
   if(nvm_cache && cache_kind){
-    fprintf(stderr, "nvm_Insert\n");
+    nvm_charge = sizeof(LRUHandle) -1 + key.size();
     e = reinterpret_cast<LRUHandle*>(
-        memkind_malloc(cache_kind, (sizeof(LRUHandle)-1 + key.size())));//分配内存空间
+            memkind_malloc(cache_kind, nvm_charge));//分配内存空间
+    sum_nvm_charge += nvm_charge;
+    if(!e)
+        DEBUG_T("memkind_malloc failed,errono:%d\n", -errno);
   }
   ///////////meggie
   else{
-    fprintf(stderr, "cache_Insert\n");
     e = reinterpret_cast<LRUHandle*>(
         malloc(sizeof(LRUHandle)-1 + key.size()));//分配内存空间, -1是因为原本char key_data[1]占了1个字节，所以减去。
   }
+  
   memset(e, 0, sizeof(e));
   e->value = value;
   e->deleter = deleter;
-  e->charge = charge;//值的字节数
+  e->value_charge = charge;
+  //////////meggie
+  if(nvm_cache && cache_kind){
+    e->charge = nvm_charge;
+  }
+  else 
+    e->charge = charge;//值的字节数
+  //////////meggie
   e->key_length = key.size();
   e->hash = hash;
   e->in_cache = false;//不在cache中，插入后才在
   e->L1_handle_ = L1_cache_;
   e->refs = 1;  // for the returned handle.
-  ///////////meggie
-  fprintf(stderr, "init, L1_handle_:%d\n", e->L1_handle_);
-  //////////meggie
   memcpy(e->key_data, key.data(), key.size());//malloc不会调用构造函数，需要自己初始化
-  fprintf(stderr, "after memvpy, L1_handle_:%d, refs:%d\n", e->L1_handle_, e->refs);
+  
 
   if (capacity_ > 0) {//capacity = 0表示关闭cache
     e->refs++;  // for the cache's reference.引用计数+1
     e->in_cache = true;//表示在缓存中
-    fprintf(stderr, "before append, L1_handle_:%d\n", e->L1_handle_);
     LRU_Append(&in_use_, e);//将其插入到in_use list中，当没有被客户使用了，即ref == 1就加入到lru_list中
-    fprintf(stderr, "after append, L1_handle_:%d\n", e->L1_handle_);
-    usage_ += charge;//占用的内存空间
-    fprintf(stderr, "before FinishErase, L1_handle_:%d\n", e->L1_handle_);
+    //////////meggie
+    usage_ += e->charge;
+    value_usage_ += charge;
+    /////////////meggie
     FinishErase(table_.Insert(e));//将handle插入到hash table中，将旧节点从LRU cache中删除
-    fprintf(stderr, "after FinishErase, L1_handle_:%d\n", e->L1_handle_);
   } else {  // don't cache. (capacity_==0 is supported and turns off caching.)
     // next is read by key() in an assert, so it must be initialized
     e->next = nullptr;
   }
-  fprintf(stderr, "before usage > capacity, L1_handle_:%d\n", e->L1_handle_);
-  while (usage_ > capacity_ && lru_.next != &lru_) {//如果内存占用量超过最大容量，并且lru list不为空时
-    fprintf(stderr, "over capacity\n");
+  
+
+  //////////meggie
+  if(nvm_cache && cache_kind)
+      check_usage = usage_ * 2;
+  else 
+      check_usage = usage_;
+  /////////meggie
+  
+  while (check_usage > capacity_ && lru_.next != &lru_) {//如果内存占用量超过最大容量，并且lru list不为空时
     LRUHandle* old = lru_.next;//获取最久未被使用的handle
-    /////////meggie
-    Slice old_key = Slice(old->key_data, old->key_length);
-    void *old_value = old->value;
-    size_t old_charge = old->charge;
-    void (*old_deleter)(const Slice& key, void* value) = old->deleter;
-    //////////meggie
-    assert(old->refs == 1);//lru list中的refs都为1
-    bool erased = FinishErase(table_.Remove(old->key(), old->hash));
-    if (!erased) {  // to avoid unused variable when compiled NDEBUG
-      assert(erased);
-    }
     ///////////meggie
     if(L1_cache_ && lower_cache_){
-        Cache::Handle *handle = lower_cache_->Insert(old_key, old_value, old_charge, old_deleter);
-        lower_cache_->Release(handle);
+        while(lru_.next != &lru_){//将所有没有使用的handle都同时批量写到L2_cache中，这样能够加快速度
+            Slice old_key = Slice(old->key_data, old->key_length);
+            void *old_value = old->value;
+            size_t old_charge = old->charge;
+            void (*old_deleter)(const Slice& key, void* value) = old->deleter;
+            assert(old->refs == 1);//lru list中的refs都为1
+            bool erased = FinishErase(table_.Remove(old->key(), old->hash));
+            if (!erased) {  // to avoid unused variable when compiled NDEBUG
+                assert(erased);
+            }
+            Cache::Handle *handle = lower_cache_->Insert(old_key, old_value, old_charge, old_deleter);
+            lower_cache_->Release(handle);
+            LRUHandle* old = lru_.next;//获取最久未被使用的handle
+        }
     }
     ///////////meggie
+    else{
+        assert(old->refs == 1);//lru list中的refs都为1
+        bool erased = FinishErase(table_.Remove(old->key(), old->hash));
+        if (!erased) {  // to avoid unused variable when compiled NDEBUG
+            assert(erased);
+        }
+    }
   }
-  fprintf(stderr, "finish_Insert\n");
-
-  fprintf(stderr, "before reinterpret_cast, L1_handle_:%d\n", e->L1_handle_);
-  result = reinterpret_cast<Cache::Handle*>(e);
-  fprintf(stderr, "after reinterpret_cast, L1_handle_:%d\n",reinterpret_cast<LRUHandle*>(result)->L1_handle_);
   return reinterpret_cast<Cache::Handle*>(e);//返回handle
 }
 
@@ -448,6 +484,7 @@ bool LRUCache::FinishErase(LRUHandle* e) {
     LRU_Remove(e);//旧节点从lru list中移除，之前已经从hash table中移除了
     e->in_cache = false;//不在cache中了
     usage_ -= e->charge;//内存占用量减去固定值
+    value_usage_ -= e->value_charge;
     Unref(e);//引用数减去1
   }
   return e != nullptr;
@@ -603,7 +640,7 @@ class ShardedLRUCache : public Cache {//继承于类Cache
 };
 //////////////////////////meggie
 
-static const int kNumNVMShardBits = 4;
+static const int kNumNVMShardBits = 0;
 static const int kNumNVMShards = 1 << kNumNVMShardBits;//16个LRU cache
 
 class ShardedNVMLRUCache : public Cache{
@@ -611,7 +648,7 @@ class ShardedNVMLRUCache : public Cache{
     LRUCache* shard_[kNumNVMShards];//私有成员，LRU cache数组
     port::Mutex id_mutex_;//互斥锁
     uint64_t last_id_;//上一个id
-    struct memkind *pmem_kind;
+    //struct memkind *pmem_kind;
     Cache *upper_cache_;
     Cache *lower_cache_;   
 
@@ -620,11 +657,11 @@ class ShardedNVMLRUCache : public Cache{
     }
 
     static uint32_t Shard(uint32_t hash) {//获取相应的LRU cache
-      return hash >> (32 - kNumShardBits);
+      return hash >> (32 - kNumNVMShardBits);
     }
   public:
     bool L1_cache;
-    ShardedNVMLRUCache(struct memkind *pmem_kind, size_t capacity): 
+    /*ShardedNVMLRUCache(struct memkind *pmem_kind, size_t capacity): 
         last_id_(0), 
         pmem_kind(pmem_kind), 
         L1_cache(false),
@@ -635,13 +672,29 @@ class ShardedNVMLRUCache : public Cache{
       for (int s = 0; s < kNumNVMShards; s++) {//设置每个LRU cache的capacity
          shard_[s] = new LRUCache(L1_cache, per_shard, pmem_kind, true);
       }
+    }*/
+    ShardedNVMLRUCache(std::string dirname, size_t capacity): 
+        last_id_(0), 
+        L1_cache(false),
+        upper_cache_(NULL),
+        lower_cache_(NULL)
+    {
+      const size_t per_shard = (capacity + (kNumNVMShards - 1)) / kNumNVMShards;//每个LRU cache平均分到的容量
+      fprintf(stderr, "capacity:%lu, kNumNVMShards: %d, per_shard:%lu, MEMKIND_PMEM_MIN_SIZE:%lu\n", 
+              capacity, kNumNVMShards, per_shard, MEMKIND_PMEM_MIN_SIZE);
+      struct memkind *pmem_kind;
+      int err = memkind_create_pmem("/mnt/pmemdir", per_shard, &pmem_kind);
+      if(err){
+        fprintf(stderr, "unable to create pmem partition");
+      }
+      for (int s = 0; s < kNumNVMShards; s++) {//设置每个LRU cache的capacity
+        shard_[s] = new LRUCache(L1_cache, per_shard, pmem_kind, true);
+      }
     }
     virtual ~ShardedNVMLRUCache() { 
       //memkind_destroy_kind(pmem_kind);
       for (int s = 0; s < kNumNVMShards; s++) {//设置每个LRU cache的capacity
-         //fprintf(stderr, "before delete shard[s]\n");
          delete shard_[s];
-         //fprintf(stderr, "after delete shard[s]\n");
       }
     }//析构函数
     virtual Handle* Insert(const Slice& key, void* value, size_t charge,
@@ -699,24 +752,26 @@ private:
     Cache *upper_cache_;
     Cache *lower_cache_;
 public:
-    TwoLevelCache(size_t L1_capacity, struct memkind *pmem_kind, size_t L2_capacity):
+    /*TwoLevelCache(size_t L1_capacity, struct memkind *pmem_kind, size_t L2_capacity):
         upper_cache_(NewLRUCache(L1_capacity)),
         lower_cache_(NewNVMLRUCache(pmem_kind, L2_capacity)){ 
         upper_cache_->setLowerCache(lower_cache_);
         lower_cache_->setUpperCache(upper_cache_);
+    }*/
+    TwoLevelCache(size_t L1_capacity, std::string dirname, size_t L2_capacity):
+        upper_cache_(NewLRUCache(L1_capacity)),
+        lower_cache_(NewNVMLRUCache(dirname, L2_capacity)){ 
+        upper_cache_->setLowerCache(lower_cache_);
+        lower_cache_->setUpperCache(upper_cache_);
     }
     ~TwoLevelCache(){ 
-        fprintf(stderr, "before ~TwoLevelCache\n");
         delete upper_cache_;
-        fprintf(stderr, "after ~upper_cache_\n");
         delete lower_cache_;
-        fprintf(stderr, "after ~TwoLevelCache\n");
     }
 
     virtual Handle* Insert(const Slice& key, void* value, size_t charge,
                            void (*deleter)(const Slice& key, void* value)) {
         Handle* h = upper_cache_->Insert(key, value, charge, deleter);
-        fprintf(stderr, "h->L1_handle_:%d\n",reinterpret_cast<LRUHandle*>(h)->L1_handle_);
         return h;
     }
     virtual Handle* Lookup(const Slice& key) {
@@ -728,11 +783,9 @@ public:
     virtual void Release(Handle* handle) {
         LRUHandle* h = reinterpret_cast<LRUHandle*>(handle);
         if(h->L1_handle_){
-            fprintf(stderr, "upperCache release\n");
             upper_cache_->Release(handle);
         }
         else{
-            fprintf(stderr, "lowerCache release\n");
             lower_cache_->Release(handle);
         }
     }
@@ -763,11 +816,15 @@ Cache* NewLRUCache(size_t capacity) {
   return new ShardedLRUCache(capacity);//实质是创建了SharedLRUCache对象
 }
 ///////////////////meggie
-Cache* NewNVMLRUCache(struct memkind *pmem_kind, size_t capacity) {
-  return new ShardedNVMLRUCache(pmem_kind, capacity);//实质是创建了SharedLRUCache对象
+Cache* NewNVMLRUCache(std::string dirname, size_t capacity) {
+  return new ShardedNVMLRUCache(dirname, capacity);//实质是创建了SharedLRUCache对象
 }
+/*
 Cache* NewTwoLevelCache(size_t L1_capacity, struct memkind* pmem_kind, size_t L2_capacity){
     return new TwoLevelCache(L1_capacity, pmem_kind, L2_capacity); 
+}*/
+Cache* NewTwoLevelCache(size_t L1_capacity, std::string dirname, size_t L2_capacity){
+    return new TwoLevelCache(L1_capacity, dirname, L2_capacity); 
 }
 /////////////////meggie
 }  // namespace leveldb
