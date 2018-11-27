@@ -35,6 +35,10 @@
 #include "util/logging.h"
 #include "util/mutexlock.h"
 
+////////////meggie
+#include "util/debug.h"
+///////////meggie
+
 namespace leveldb {
 
 const int kNumNonTableCacheFiles = 10;
@@ -112,6 +116,10 @@ Options SanitizeOptions(const std::string& dbname,
   }
   if (result.block_cache == nullptr) {
     result.block_cache = NewLRUCache(8 << 20);
+    //////////meggie
+    //DEBUG_T("result.block_size:%lu\n", result.block_size);
+    //result.block_cache = NewTwoLevelCache(8 << 20, "/mnt/pmemdir", result.pmem_kind, 32 << 20, result.block_size);
+    /////////meggie
   }
   return result;
 }

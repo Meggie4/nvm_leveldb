@@ -11,7 +11,7 @@
 #include <inttypes.h>
 #include <pthread.h>
 
-//#define DEBUG
+#define DEBUG
 
 //Trouble shooting debug
 //use only if trouble shooting

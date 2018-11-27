@@ -24,6 +24,9 @@ Options::Options()
       max_file_size(2<<20),
       compression(kSnappyCompression),
       reuse_logs(false),
+      //////////meggie
+      pmem_kind(nullptr),
+      /////////meggie
       filter_policy(nullptr) {
 }
 

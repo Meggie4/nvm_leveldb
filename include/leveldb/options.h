@@ -8,6 +8,11 @@
 #include <stddef.h>
 #include "leveldb/export.h"
 
+/////////meggie
+#include <memkind.h>
+#include <memkind/internal/memkind_pmem.h>
+////////meggie
+
 namespace leveldb {
 
 class Cache;
@@ -105,6 +110,9 @@ struct LEVELDB_EXPORT Options {
   //
   // Default: 4K
   size_t block_size;
+  ////////meggie
+  struct memkind* pmem_kind;
+  ///////meggie
 
   // Number of keys between restart points for delta encoding of keys.
   // This parameter can be changed dynamically.  Most clients should

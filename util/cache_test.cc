@@ -14,7 +14,7 @@
 #include <memkind/internal/memkind_pmem.h>
 #include "util/debug.h"
 
-#define PMEM_MAX_SIZE MEMKIND_PMEM_MIN_SIZE * 1
+#define PMEM_CACHE_SIZE MEMKIND_PMEM_MIN_SIZE * 1
 namespace leveldb {
 
 struct student{
@@ -51,13 +51,9 @@ class CacheTest {
 
   CacheTest(){//构造函数
     struct memkind *pmem_kind;
-    /*int err = memkind_create_pmem("/mnt/pmemdir", PMEM_MAX_SIZE, &pmem_kind);
-    if(err){
-      fprintf(stderr, "unable to create pmem partition");
-    }*/
-    //cache_ = NewTwoLevelCache(kCacheSize, pmem_kind, PMEM_MAX_SIZE);
+    size_t block_size = 4 * 1024;
     std::string dirname = "/mnt/pmemdir";
-    cache_ = NewNVMLRUCache(dirname, PMEM_MAX_SIZE);
+    cache_ = NewNVMLRUCache(dirname, pmem_kind, PMEM_CACHE_SIZE, block_size);
     current_ = this;
   }
 
@@ -93,7 +89,7 @@ class CacheTest {
   }
 };
 CacheTest* CacheTest::current_;
-/*
+
 TEST(CacheTest, HitAndMiss) {//命中和缺失
   DEBUG_T("before_lookup\n");
   ASSERT_EQ(-1, Lookup(100));
@@ -185,24 +181,31 @@ TEST(CacheTest, EvictionPolicy) {//替换策略
   ASSERT_EQ(201, Lookup(200));//在二级cache中找到
   ASSERT_EQ(301, Lookup(300));
   cache_->Release(h);
-}*/
+}
 
 TEST(CacheTest, UseExceedsCacheSize) {//超过内存容量
   // Overfill the cache, keeping handles on all inserted entries.
   std::vector<Cache::Handle*> h;
+  int added = 0;
+  int index = 0;
   DEBUG_T("before insert\n");
-  for (int i = 0; i < PMEM_MAX_SIZE + 100; i++) {
+  while(added < PMEM_CACHE_SIZE + 8 * 1024){
     //DEBUG_T("i:%lu, PMEM_MAX_SIZE:%lu\n", i, kCacheSize + PMEM_MAX_SIZE);
-    Insert(i, i+1);
+    h.push_back(InsertAndReturnHandle(index, index + 1, 4 * 1024));
+    if(index < 3)
+       cache_->Release(h[index]);
+    index++;
+    added += 4*1024;
+        
   }
   DEBUG_T("after insert\n");
 
   // Check that all the entries can be found in the cache.
-  for (int i = 0; i < h.size(); i++) {
-    ASSERT_EQ(2000+i, Lookup(1000+i));
+  for (int i = 3; i < h.size(); i++) {
+    ASSERT_EQ(1+i, Lookup(i));
   }
 
-  for (int i = 0; i < h.size(); i++) {
+  for (int i = 3; i < h.size(); i++) {
     cache_->Release(h[i]);
   }
 }
