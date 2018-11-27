@@ -321,8 +321,9 @@ void LRUCache::Ref(LRUHandle* e) {
   e->refs++;//如果不在cache中，那只是引用数+1
 }
 
-void LRUCache::Unref(LRUHandle* e) {//解引用
+void** LRUCache::Unref(LRUHandle* e) {//解引用
   assert(e->refs > 0);
+  void** 
   e->refs--;//引用数-1
   if (e->refs == 0) {  // Deallocate.引用数为0了
     assert(!e->in_cache);
@@ -333,13 +334,18 @@ void LRUCache::Unref(LRUHandle* e) {//解引用
       sum_meta_charge -= e->charge;
     }
     //////////meggie
-    else
+    else{
       free(e);//释放handle所占的内存空间
+      //新建nvm handle
+      memkind_malloc
+      
+    }
   } else if (e->in_cache && e->refs == 1) {//如果引用数为1,表示此时没有被客户端使用了
     // No longer in use; move to lru_ list.
     LRU_Remove(e);//将LRU从 in_use list中移除
     LRU_Append(&lru_, e);//将LRU加入到 lru_list中，lru_list第一个节点就是最早未使用的节点
   }
+  return nullptr;
 }
 
 void LRUCache::LRU_Remove(LRUHandle* e) {//从相应的链表中移除
@@ -425,14 +431,17 @@ Cache::Handle* LRUCache::Insert(
     if(L1_cache_ && lower_cache_){
         while(lru_.next != &lru_){//将所有没有使用的handle都同时批量写到L2_cache中，这样能够加快速度
             Slice old_key = Slice(old->key_data, old->key_length);
-            void *old_value = old->value;
+            void* old_value = old->value;
             size_t old_charge = old->charge;
             void (*old_deleter)(const Slice& key, void* value) = old->deleter;
             assert(old->refs == 1);//lru list中的refs都为1
+            //获取新的在nvm中的value
+            void* new_value;
             bool erased = FinishErase(table_.Remove(old->key(), old->hash));
             if (!erased) {  // to avoid unused variable when compiled NDEBUG
                 assert(erased);
             }
+            //此时old_value肯定是无效的，当擦除之后
             Cache::Handle *handle = lower_cache_->Insert(old_key, old_value, old_charge, old_deleter);
             lower_cache_->Release(handle);
             LRUHandle* old = lru_.next;//获取最久未被使用的handle
@@ -453,13 +462,13 @@ Cache::Handle* LRUCache::Insert(
 
 // If e != nullptr, finish removing *e from the cache; it has already been
 // removed from the hash table.  Return whether e != nullptr.
-bool LRUCache::FinishErase(LRUHandle* e) {
+bool LRUCache::FinishErase(LRUHandle* e, void** new_value) {
   if (e != nullptr) {//旧节点存在
     assert(e->in_cache);
     LRU_Remove(e);//旧节点从lru list中移除，之前已经从hash table中移除了
     e->in_cache = false;//不在cache中了
     usage_ -= e->charge;//内存占用量减去固定值
-    Unref(e);//引用数减去1
+    new_value = Unref(e);//引用数减去1
   }
   return e != nullptr;
 }
